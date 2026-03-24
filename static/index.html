@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blended Index Portfolio Builder</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f3f6ff; }
+        header { text-align: center; padding: 18px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; }
+        header h1 { margin: 0; font-size: 24px; }
+        header p { margin: 6px 0 0; opacity: 0.9; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Blended Index Portfolio Builder</h1>
+        <p>Upload the index CSVs to build a blended portfolio and explore the results.</p>
+    </header>
+
+    <hr style="width:90%; margin:20px auto; opacity:0.1;">
+    <div class="panel">
+        <div class="panel-left">
+            <h3>Build Blended Portfolio</h3>
+            <label>S&P 500 CSV<div class="input"><input id="sp500" type="file" accept=".csv"></div></label>
+            <div id="preview-sp500" class="preview"></div>
+            <label>Nasdaq-100 CSV<div class="input"><input id="nasdaq100" type="file" accept=".csv"></div></label>
+            <div id="preview-nasdaq100" class="preview"></div>
+            <label>Russell 3000 CSV<div class="input"><input id="russell" type="file" accept=".csv"></div></label>
+            <div id="preview-russell" class="preview"></div>
+            <label>API Key (optional)<div class="input"><input id="api_key" type="text" placeholder="X-API-Key"></div></label>
+
+            <div class="actions">
+                <button id="buildBtn" onclick="submitSync(event)" class="btn primary">Build & View</button>
+                <button id="bgBtn" onclick="submitBackground(event)" class="btn success">Submit Background Job</button>
+                <button id="clearBtn" onclick="clearResult()" class="btn">Clear</button>
+            </div>
+
+            <div id="status" class="status"></div>
+
+            <div class="jobbox">
+                <h4>Job History</h4>
+                <ul id="jobList"></ul>
+            </div>
+        </div>
+        <div class="panel-right">
+            <div class="controls">
+                <input id="search" placeholder="Search ticker or name" oninput="applyFilters()">
+                <select id="sourceFilter" onchange="applyFilters()">
+                    <option value="">All sources</option>
+                    <option value="SP500">S&P 500</option>
+                    <option value="NASDAQ">NASDAQ</option>
+                    <option value="RUSSELL">RUSSELL</option>
+                </select>
+                <select id="pageSize" onchange="renderTable()">
+                    <option>10</option>
+                    <option selected>20</option>
+                    <option>50</option>
+                </select>
+            </div>
+            <div id="resultArea" class="results"></div>
+            <div class="pagination" id="pager"></div>
+        </div>
+    </div>
+
+    <style>
+        .panel{width:90%;max-width:1100px;margin:18px auto;background:#fff;border-radius:12px;padding:18px;display:flex;gap:18px;box-shadow:0 12px 40px rgba(0,0,0,0.12)}
+        .panel-left{width:320px}
+        .panel-right{flex:1}
+        label{display:block;font-size:13px;color:#333;margin-bottom:8px}
+        .input input{width:100%;padding:8px;border-radius:6px;border:1px solid #ddd}
+        .actions{display:flex;gap:8px;margin-top:10px}
+        .btn{padding:8px 12px;border-radius:8px;border:none;cursor:pointer}
+        .btn.primary{background:#667eea;color:#fff}
+        .btn.success{background:#4caf50;color:#fff}
+        .status{margin-top:12px;color:#333;font-size:13px}
+        .jobbox{margin-top:14px}
+        .jobbox ul{list-style:none;padding-left:0}
+        .jobbox li{font-size:13px;padding:6px 0;border-bottom:1px dashed #eee}
+        .preview{margin:8px 0;padding:8px;border-radius:6px;background:#fbfbff;border:1px solid #f0f4ff;max-height:140px;overflow:auto;font-size:12px}
+        .controls{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+        .controls input{flex:1;padding:8px;border-radius:6px;border:1px solid #ddd}
+        .controls select{padding:8px;border-radius:6px;border:1px solid #ddd}
+        .results{max-height:520px;overflow:auto}
+        table{width:100%;border-collapse:collapse}
+        th,td{padding:8px;border-bottom:1px solid #f0f0f0;text-align:left}
+        th{background:#fafafa;cursor:pointer}
+        .weightbar{height:10px;background:#e6eefc;border-radius:6px;overflow:hidden}
+        .weightbar > i{display:block;height:100%;background:#667eea}
+        .pagination{margin-top:8px;display:flex;gap:6px;align-items:center}
+        .page-btn{padding:6px 8px;border-radius:6px;border:1px solid #ddd;background:#fff;cursor:pointer}
+    </style>
+
+    <script>
+        // helpers
+        function saveApiKey(v){ localStorage.setItem('portfolio_api_key', v) }
+        function loadApiKey(){ return localStorage.getItem('portfolio_api_key')||'' }
+        document.getElementById('api_key').value = loadApiKey();
+        document.getElementById('api_key').addEventListener('change', (e)=>saveApiKey(e.target.value));
+
+        let currentData = [];
+        let filteredData = [];
+        let sortState = {col:null,dir:1};
+        let currentPage = 1;
+
+        function parseCSV(text){
+            const rows = [];
+            const lines = text.split(/\r?\n/).filter(Boolean);
+            const hdr = lines.shift();
+            const headers = hdr.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(h=>h.replace(/^"|"$/g,'').trim());
+            for(const line of lines){
+                const cols = line.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(c=>c.replace(/^"|"$/g,'').trim());
+                const obj = {};
+                headers.forEach((h,i)=>obj[h]=cols[i]||'');
+                rows.push(obj);
+            }
+            return {headers,rows};
+        }
+
+        function renderTable(){
+            const area = document.getElementById('resultArea'); area.innerHTML='';
+            const pageSize = parseInt(document.getElementById('pageSize').value,10)||20;
+            const start = (currentPage-1)*pageSize; const end = start+pageSize;
+            const slice = filteredData.slice(start,end);
+            if(slice.length===0){ area.innerHTML='<p style="color:#666">No results</p>'; renderPager(); return }
+            const table = document.createElement('table');
+            const hdrs = Object.keys(slice[0]);
+            const thead = document.createElement('thead'); const tr = document.createElement('tr');
+            hdrs.forEach(h=>{ const th=document.createElement('th'); th.textContent=h; th.onclick=()=>toggleSort(h); if(sortState.col===h) th.textContent += sortState.dir>0?' ▲':' ▼'; tr.appendChild(th)}); thead.appendChild(tr); table.appendChild(thead);
+            const tbody = document.createElement('tbody');
+            slice.forEach(r=>{ const tr=document.createElement('tr'); hdrs.forEach(h=>{ const td=document.createElement('td'); if(h.toLowerCase().includes('weight')){ const v = parseFloat((r[h]||'0').replace('%',''))||0; const bar=document.createElement('div'); bar.className='weightbar'; const inner=document.createElement('i'); inner.style.width=(Math.min(v,100))+'%'; bar.appendChild(inner); td.appendChild(bar); td.appendChild(document.createTextNode(' '+(v.toFixed(2)||'0')+'%')); } else td.textContent = r[h]; tr.appendChild(td) }); tbody.appendChild(tr) });
+            table.appendChild(tbody); area.appendChild(table); renderPager();
+        }
+
+        function toggleSort(col){ if(sortState.col===col) sortState.dir*=-1; else { sortState.col=col; sortState.dir=1 } applySort(); }
+        function applySort(){ if(!sortState.col){ applyFilters(); return } filteredData.sort((a,b)=>{ const A=(a[sortState.col]||'').toString(); const B=(b[sortState.col]||'').toString(); const nA=parseFloat(A.replace(/[^0-9.-]+/g,'')); const nB=parseFloat(B.replace(/[^0-9.-]+/g,'')); if(!isNaN(nA) && !isNaN(nB)) return (nA-nB)*sortState.dir; return A.localeCompare(B)*sortState.dir }); currentPage=1; renderTable() }
+
+        function applyFilters(){ const q=document.getElementById('search').value.toLowerCase(); const src=document.getElementById('sourceFilter').value; filteredData = currentData.filter(r=>{ if(src && (r.source||'')!==src) return false; if(!q) return true; return (r.ticker||'').toLowerCase().includes(q) || (r.name||'').toLowerCase().includes(q) }); currentPage=1; applySort(); renderTable(); }
+
+        function renderPager(){ const pager=document.getElementById('pager'); pager.innerHTML=''; const pageSize = parseInt(document.getElementById('pageSize').value,10)||20; const total = filteredData.length; const pages = Math.max(1, Math.ceil(total/pageSize)); const info=document.createElement('span'); info.textContent = ` ${total} rows `; pager.appendChild(info); if(pages<=1) return; const prev=document.createElement('button'); prev.className='page-btn'; prev.textContent='Prev'; prev.onclick=()=>{ if(currentPage>1){ currentPage--; renderTable() } }; pager.appendChild(prev); const pinfo=document.createElement('span'); pinfo.textContent=` Page ${currentPage} / ${pages} `; pager.appendChild(pinfo); const next=document.createElement('button'); next.className='page-btn'; next.textContent='Next'; next.onclick=()=>{ if(currentPage<pages){ currentPage++; renderTable() } }; pager.appendChild(next); }
+
+        function clearResult(){ document.getElementById('resultArea').innerHTML=''; document.getElementById('status').textContent=''; currentData=[]; filteredData=[]; document.getElementById('jobList').innerHTML=''; }
+
+        function addJobToList(jobId){ const ul=document.getElementById('jobList'); const li=document.createElement('li'); li.id='job-'+jobId; li.textContent = jobId + ' — pending'; ul.insertBefore(li, ul.firstChild); }
+        function updateJobList(jobId, status){ const el=document.getElementById('job-'+jobId); if(el) el.textContent = jobId + ' — ' + status }
+
+        async function submitSync(e){ e.preventDefault(); const sp = document.getElementById('sp500').files[0]; const nd = document.getElementById('nasdaq100').files[0]; const ru = document.getElementById('russell').files[0]; const api = document.getElementById('api_key').value.trim(); if(!sp||!nd||!ru){ alert('Select all three CSVs'); return } const fd=new FormData(); fd.append('sp500',sp); fd.append('nasdaq100',nd); fd.append('russell',ru); document.getElementById('status').textContent='Building (sync)...'; disableButtons(true);
+            try{ const headers = {}; if(api) headers['X-API-Key']=api; const res = await fetch('/build-portfolio',{method:'POST',body:fd,headers}); if(!res.ok){ const j = await res.json().catch(()=>null); throw new Error(j?.detail||res.statusText) } const txt = await res.text(); const parsed = parseCSV(txt); currentData = parsed.rows; filteredData = currentData.slice(); document.getElementById('status').textContent='Done'; renderTable(); // download link
+                const blob = new Blob([txt],{type:'text/csv'}); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href=url; a.download='portfolio.csv'; a.textContent='Download CSV'; a.style.display='inline-block'; a.style.margin='8px 0'; document.getElementById('resultArea').insertAdjacentElement('afterbegin',a);
+            }catch(err){ document.getElementById('status').textContent='Error: '+err.message }
+            finally{ disableButtons(false) }
+        }
+
+        function disableButtons(v){ document.getElementById('buildBtn').disabled=v; document.getElementById('bgBtn').disabled=v; document.getElementById('clearBtn').disabled=v }
+
+        async function submitBackground(e){ e.preventDefault(); const sp = document.getElementById('sp500').files[0]; const nd = document.getElementById('nasdaq100').files[0]; const ru = document.getElementById('russell').files[0]; const api = document.getElementById('api_key').value.trim(); if(!sp||!nd||!ru){ alert('Select all three CSVs'); return } const fd=new FormData(); fd.append('sp500',sp); fd.append('nasdaq100',nd); fd.append('russell',ru); document.getElementById('status').textContent='Submitting background job...'; disableButtons(true);
+            try{ const headers = {}; if(api) headers['X-API-Key']=api; const res = await fetch('/jobs/build',{method:'POST',body:fd,headers}); if(!res.ok){ const j = await res.json().catch(()=>null); throw new Error(j?.detail||res.statusText) } const j = await res.json(); const jobId = j.job_id; addJobToList(jobId); document.getElementById('status').textContent='Job submitted: '+jobId; // poll
+                const poll = setInterval(async ()=>{ const sres = await fetch('/jobs/'+jobId); if(!sres.ok){ updateJobList(jobId,'not found'); clearInterval(poll); disableButtons(false); return } const sj = await sres.json(); updateJobList(jobId,sj.status); if(sj.status==='done'){ clearInterval(poll); document.getElementById('status').textContent='Downloading...'; const dres = await fetch('/jobs/'+jobId+'/download'); if(!dres.ok){ const jerr = await dres.json().catch(()=>null); document.getElementById('status').textContent='Download error: '+(jerr?.detail||dres.statusText); disableButtons(false); return } const txt = await dres.text(); const parsed = parseCSV(txt); currentData = parsed.rows; filteredData = currentData.slice(); renderTable(); document.getElementById('status').textContent='Done'; disableButtons(false); } else if(sj.status==='error'){ clearInterval(poll); document.getElementById('status').textContent='Job error: '+(sj.error||'unknown'); disableButtons(false); } }, 2000);
+            }catch(err){ document.getElementById('status').textContent='Error: '+err.message; disableButtons(false) }
+        }
+
+        // Client-side CSV preview for selected files
+        async function previewLocalFile(inputId, previewId, maxRows=6){
+            const el = document.getElementById(inputId);
+            const preview = document.getElementById(previewId);
+            preview.innerHTML = '';
+            if(!el || !el.files || !el.files[0]) return;
+            try{
+                const txt = await el.files[0].text();
+                const parsed = parseCSV(txt);
+                const rows = parsed.rows.slice(0, maxRows);
+                if(rows.length===0){ preview.textContent = 'No preview available'; return }
+                const table = document.createElement('table'); table.style.width='100%'; table.style.borderCollapse='collapse';
+                const thead = document.createElement('thead'); const trh = document.createElement('tr'); Object.keys(rows[0]).slice(0,4).forEach(h=>{ const th=document.createElement('th'); th.textContent=h; th.style.fontSize='11px'; th.style.padding='4px'; trh.appendChild(th) }); thead.appendChild(trh); table.appendChild(thead);
+                const tbody = document.createElement('tbody'); rows.forEach(r=>{ const tr=document.createElement('tr'); Object.keys(r).slice(0,4).forEach(h=>{ const td=document.createElement('td'); td.textContent = r[h]; td.style.fontSize='11px'; td.style.padding='4px'; tr.appendChild(td) }); tbody.appendChild(tr) }); table.appendChild(tbody); preview.appendChild(table);
+            }catch(err){ preview.textContent = 'Preview error: '+err.message }
+        }
+
+        document.getElementById('sp500').addEventListener('change', ()=>previewLocalFile('sp500','preview-sp500'));
+        document.getElementById('nasdaq100').addEventListener('change', ()=>previewLocalFile('nasdaq100','preview-nasdaq100'));
+        document.getElementById('russell').addEventListener('change', ()=>previewLocalFile('russell','preview-russell'));
+    </script>
+</body>
+</html>
