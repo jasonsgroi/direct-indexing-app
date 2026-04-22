@@ -32,6 +32,30 @@ RATE_LIMIT_WINDOW = 60  # seconds
 RATE_LIMIT_MAX = int(os.environ.get("PORTFOLIO_RATE_LIMIT", "10"))  # requests per window per client
 rate_store = {}  # client_id -> list[timestamps]
 
+COLUMN_ALIASES = {
+    "ticker": ["ticker", "symbol", "stock", "security", "company_ticker"],
+    "market_cap": ["market_cap", "market cap", "marketcap", "mkt_cap", "cap", "market value"],
+}
+
+def normalize_text(value: str) -> str:
+    return value.strip().lower().replace("_", " ")
+
+def resolve_columns(fieldnames):
+    if not fieldnames:
+        return None, None
+
+    lowered = {normalize_text(name): name for name in fieldnames}
+
+    def find_alias(options):
+        for option in options:
+            key = normalize_text(option)
+            if key in lowered:
+                return lowered[key]
+        return None
+
+    ticker_col = find_alias(COLUMN_ALIASES["ticker"])
+    market_cap_col = find_alias(COLUMN_ALIASES["market_cap"])
+    return ticker_col, market_cap_col
 
 def _client_id(request: Request, x_api_key: Optional[str]):
     if x_api_key:
@@ -62,30 +86,57 @@ def check_rate_limit(client_id: str):
 
 
 def validate_csv_file(path: str, max_rows_check: int = 50, max_size_bytes: int = 10 * 1024 * 1024):
-    """Basic CSV validation: headers and market_cap numeric. Returns (ok, message)."""
     try:
         if os.path.getsize(path) > max_size_bytes:
-            return False, f"file too large (>{max_size_bytes} bytes)"
-        with open(path, newline='', encoding='utf-8') as f:
+            return False, f"File is too large. Maximum allowed size is {max_size_bytes} bytes."
+
+        with open(path, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            headers = [h.lower() for h in reader.fieldnames or []]
-            required = {"ticker", "market_cap"}
-            if not required.issubset(set(headers)):
-                return False, f"missing required headers: {required - set(headers)}"
+
+            if not reader.fieldnames:
+                return False, "The CSV appears to be empty or missing a header row."
+
+            ticker_col, market_cap_col = resolve_columns(reader.fieldnames)
+
+            if not ticker_col:
+                return False, "Missing a ticker column. Accepted names include: ticker, symbol, stock, security, company_ticker."
+
+            if not market_cap_col:
+                return False, "Missing a market cap column. Accepted names include: market_cap, market cap, marketcap, mkt_cap, cap, market value."
+
             count = 0
+            seen_valid_row = False
+
             for r in reader:
                 if count >= max_rows_check:
                     break
                 count += 1
-                mc = r.get("market_cap") or r.get("Market_Cap") or r.get("marketCap")
-                if mc is None:
-                    return False, "market_cap missing in a row"
+
+                ticker_val = (r.get(ticker_col) or "").strip()
+                market_cap_val = (r.get(market_cap_col) or "").strip()
+
+                if not ticker_val and not market_cap_val:
+                    continue
+
+                if not ticker_val:
+                    return False, f"Missing ticker value in row {count}."
+
+                if not market_cap_val:
+                    return False, f"Missing market cap value in row {count}."
+
                 try:
-                    float(str(mc).replace(',', ''))
+                    float(market_cap_val.replace(",", "").replace("$", "").strip())
                 except Exception:
-                    return False, f"invalid market_cap '{mc}' in row {count}"
+                    return False, f"Invalid market cap '{market_cap_val}' in row {count}. Use a numeric value like 123456789 or 123,456,789."
+
+                seen_valid_row = True
+
+            if not seen_valid_row:
+                return False, "The CSV did not contain any usable rows."
+
     except Exception as e:
-        return False, str(e)
+        return False, f"Could not read CSV: {str(e)}"
+
     return True, "ok"
 
 
