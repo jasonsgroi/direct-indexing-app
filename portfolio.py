@@ -8,24 +8,40 @@ MAX_HOLDINGS = 100
 MAX_POSITION = 0.08  # 8%
 
 
-def read_index(path, source_name):
-    rows = []
-    with open(path, newline='', encoding='utf-8') as f:
+def normalize_text(value: str) -> str:
+    return value.strip().lower().replace("_", " ")
+
+def resolve_columns(fieldnames):
+    lowered = {normalize_text(name): name for name in fieldnames or []}
+
+    ticker_col = None
+    market_cap_col = None
+    name_col = None
+
+    for key, original in lowered.items():
+        if "ticker" in key:
+            ticker_col = original
+        elif "market cap" in key or "market_cap" in key:
+            market_cap_col = original
+        elif "name" in key:
+            name_col = original
+
+    return ticker_col, market_cap_col, name_col
+
+
+def read_index(csv_path, source_name):
+    with open(csv_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        for r in reader:
-            try:
-                mc = float(r.get("market_cap", 0) or 0)
-            except Exception:
-                mc = 0.0
+        ticker_col, market_cap_col, name_col = resolve_columns(reader.fieldnames)
+        rows = []
+        for row in reader:
             rows.append({
-                "ticker": r.get("ticker").strip(),
-                "name": r.get("name", "").strip(),
-                "market_cap": mc,
+                "ticker": row[ticker_col].strip().upper(),
+                "name": row[name_col].strip() if name_col else "",
+                "market_cap": float(row[market_cap_col]) if market_cap_col else 0.0,
                 "source": source_name,
             })
-    # sort by market cap descending
-    rows.sort(key=lambda r: r["market_cap"], reverse=True)
-    return rows
+        return rows
 
 
 def select_from_index(index_rows, target_weight, already_selected, max_total_slots):
