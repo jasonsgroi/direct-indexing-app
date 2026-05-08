@@ -1,7 +1,8 @@
 import csv
 import argparse
 from collections import OrderedDict
-
+import os
+from openpyxl import load_workbook
 
 BLENDED_WEIGHTS = {"SP500": 0.40, "NASDAQ": 0.40, "RUSSELL": 0.20}
 MAX_HOLDINGS = 100
@@ -19,30 +20,169 @@ def resolve_columns(fieldnames):
     name_col = None
 
     for key, original in lowered.items():
-        if "ticker" in key:
+
+        if not ticker_col and (
+            "ticker" in key
+            or "symbol" in key
+            or "security" in key
+            or "holding" in key
+            or "constituent" in key
+        ):
             ticker_col = original
-        elif "market cap" in key or "market_cap" in key:
+
+        if not market_cap_col and (
+            "cap" in key
+            or "market" in key
+            or "weight" in key
+            or "mkt" in key
+            or "value" in key
+            or "%" in key
+        ):
             market_cap_col = original
-        elif "name" in key:
+
+        if not name_col and key in {"name", "company", "company name"}:
             name_col = original
 
     return ticker_col, market_cap_col, name_col
 
+def parse_market_cap(value):
+    if value is None:
+        return 0.0
 
-def read_index(csv_path, source_name):
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        ticker_col, market_cap_col, name_col = resolve_columns(reader.fieldnames)
-        rows = []
-        for row in reader:
+    text = str(value).strip().lower()
+    text = text.replace("$", "").replace(",", "").replace(" ", "")
+
+    if not text:
+        return 0.0
+
+    # Accept percentage-style values like 7.2%, 0.072%, or 7.2 percent.
+    # These are treated as relative ranking values, not literal market caps.
+    if text.endswith("%"):
+        try:
+            return float(text[:-1])
+        except Exception:
+            return 0.0
+
+    if "percent" in text:
+        try:
+            return float(text.replace("percent", ""))
+        except Exception:
+            return 0.0
+
+    multiplier = 1.0
+
+    if "trillion" in text:
+        multiplier = 1_000_000_000_000
+        text = text.replace("trillion", "")
+    elif "billion" in text:
+        multiplier = 1_000_000_000
+        text = text.replace("billion", "")
+    elif "million" in text:
+        multiplier = 1_000_000
+        text = text.replace("million", "")
+    elif text.endswith("t"):
+        multiplier = 1_000_000_000_000
+        text = text[:-1]
+    elif text.endswith("b"):
+        multiplier = 1_000_000_000
+        text = text[:-1]
+    elif text.endswith("m"):
+        multiplier = 1_000_000
+        text = text[:-1]
+
+    try:
+        return float(text) * multiplier
+    except Exception:
+        return 0.0
+
+
+def read_index(path, source_name):
+    rows = []
+
+    ext = os.path.splitext(path)[1].lower()
+
+    if ext == ".xlsx":
+        wb = load_workbook(path, data_only=True)
+        ws = wb.active or wb.worksheets[0]
+
+        values = list(ws.iter_rows(values_only=True))
+        if not values:
+            raise ValueError(f"{source_name}: empty Excel file")
+
+        headers = [str(h).strip() if h is not None else "" for h in values[0]]
+        ticker_col, market_cap_col, name_col = resolve_columns(headers)
+
+        if not ticker_col:
+            raise ValueError(f"{source_name}: could not find ticker column")
+
+        if not market_cap_col:
+            raise ValueError(f"{source_name}: could not find market cap/weight column")
+
+        ticker_idx = headers.index(ticker_col)
+        market_cap_idx = headers.index(market_cap_col)
+        name_idx = headers.index(name_col) if name_col else None
+
+        for row in values[1:]:
+            ticker = str(row[ticker_idx]).strip() if row[ticker_idx] is not None else ""
+            if not ticker:
+                continue
+
+            mc = parse_market_cap(row[market_cap_idx])
+
             rows.append({
-                "ticker": row[ticker_col].strip().upper(),
-                "name": row[name_col].strip() if name_col else "",
-                "market_cap": float(row[market_cap_col]) if market_cap_col else 0.0,
+                "ticker": ticker,
+                "name": str(row[name_idx]).strip() if name_idx is not None and row[name_idx] is not None else "",
+                "market_cap": mc,
                 "source": source_name,
             })
-        return rows
 
+    else:
+        encodings = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
+        last_error = None
+        reader = None
+        f = None
+
+        for encoding in encodings:
+            try:
+                f = open(path, newline="", encoding=encoding)
+                reader = csv.DictReader(f)
+                break
+            except Exception as e:
+                last_error = e
+                if f:
+                    f.close()
+
+        if reader is None:
+            raise ValueError(f"Could not read CSV: {last_error}")
+
+        try:
+            ticker_col, market_cap_col, name_col = resolve_columns(reader.fieldnames)
+
+            if not ticker_col:
+                raise ValueError(f"{source_name}: could not find ticker column")
+
+            if not market_cap_col:
+                raise ValueError(f"{source_name}: could not find market cap/weight column")
+
+            for r in reader:
+                ticker = (r.get(ticker_col) or "").strip()
+                if not ticker:
+                    continue
+
+                mc = parse_market_cap(r.get(market_cap_col))
+
+                rows.append({
+                    "ticker": ticker,
+                    "name": (r.get(name_col) or "").strip() if name_col else "",
+                    "market_cap": mc,
+                    "source": source_name,
+                })
+        finally:
+            if f:
+                f.close()
+
+    rows.sort(key=lambda r: r["market_cap"], reverse=True)
+    return rows
 
 def select_from_index(index_rows, target_weight, already_selected, max_total_slots):
     # Select constituents excluding already_selected, up to available slots
